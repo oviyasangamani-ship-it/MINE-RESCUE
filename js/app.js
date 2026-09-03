@@ -1,14 +1,13 @@
 /**
- * Application Bootstrap & Telemetry Orchestrator
- * Integrates Hardware, Vision, Analytics, UI, Audio, and Simulator.
+ * Application Bootstrap & Telemetry Orchestrator (v4)
+ * Coordinates Hardware, Vision, Analytics, IMU Rover Status, UI, and Simulator.
  */
 class AppOrchestrator {
   constructor() {
     this.activeTab = 'live'; // 'live' | 'simulator'
-    this.isDemoMode = false;
-    this.demoInterval = null;
     this.startTime = Date.now();
     this.lastPacketPulseTime = 0;
+    this.lastRoverWarnTime = 0;
   }
 
   async init() {
@@ -17,7 +16,7 @@ class AppOrchestrator {
     // 1. Initialize UI & Audio
     window.UI.init();
 
-    // 2. Initialize Video Subsystem
+    // 2. Initialize Video Subsystem (ESP32-CAM default standby)
     const videoElem = document.getElementById('camera-video-elem');
     const canvasElem = document.getElementById('camera-canvas-elem');
     if (videoElem && canvasElem) {
@@ -34,9 +33,7 @@ class AppOrchestrator {
     this._bindHardwareEvents();
     this._bindTelemetryUpdates();
     this._bindNavigationTabs();
-    this._bindDemoModeToggle();
     this._bindVideoControls();
-    this._bindHardwareModalActions();
     this._bindThresholdForm();
     this._bindSimulatorControls();
 
@@ -48,36 +45,30 @@ class AppOrchestrator {
     this._renderLiveDashboard(window.Telemetry.current);
     window.UI.renderTimeline();
 
-    // Log startup
-    window.Telemetry.logEvent('SYSTEM', 'Mining Rescue Rover Tactical Subsystem Online (SCADA Ground-Truth Mode)', 'INFO');
+    window.Telemetry.logEvent('SYSTEM', 'Mining Rescue Rover Subsystem Online (Ground-Truth SCADA Mode)', 'INFO');
   }
 
   /**
    * Hardware Stream Subscriptions
    */
   _bindHardwareEvents() {
-    // Data stream
     window.HardwareManager.onData((parsedData, rawLine) => {
       this.lastPacketPulseTime = Date.now();
       window.Telemetry.update(parsedData);
       this._pulseTelemetryScanline();
-      
-      // Update terminal drawer
-      this._updateTerminalLog();
     });
 
-    // Hardware status changes
     window.HardwareManager.onStatusChange((newStatus, prevStatus) => {
       this._updateHardwareStatusBadge(newStatus);
+      window.UI.updateConnectButtonUI();
+
       if (newStatus === 'DISCONNECTED') {
-        if (!this.isDemoMode) {
-          window.Telemetry.setAwaitingConnection();
-        }
-        window.Telemetry.logEvent('HARDWARE', 'Rover telemetry link disconnected.', 'WARNING');
+        window.Telemetry.setAwaitingConnection();
+        window.Telemetry.logEvent('HARDWARE', 'Rover communication link disconnected.', 'WARNING');
       } else if (newStatus === 'CONNECTED') {
-        window.Telemetry.logEvent('HARDWARE', `Rover communication link established (${window.HardwareManager.mode.toUpperCase()}).`, 'SUCCESS');
+        window.Telemetry.logEvent('HARDWARE', 'Rover communication link established.', 'SUCCESS');
       } else if (newStatus === 'STALE') {
-        window.Telemetry.logEvent('HARDWARE', 'Warning: Rover telemetry packet stream is stale (>3.5s latency).', 'WARNING');
+        window.Telemetry.logEvent('HARDWARE', 'Warning: Telemetry packet stream is stale (>3.5s latency).', 'WARNING');
       }
     });
   }
@@ -99,7 +90,7 @@ class AppOrchestrator {
    * Render Page 1 (Live Rescue Monitor)
    */
   _renderLiveDashboard(telemetry) {
-    const hwStatus = this.isDemoMode ? 'CONNECTED' : window.HardwareManager.status;
+    const hwStatus = window.HardwareManager.status;
     const isDisconnected = (hwStatus === 'DISCONNECTED');
 
     // 1. Evaluate Multi-Criteria Hazard Assessment
@@ -112,104 +103,170 @@ class AppOrchestrator {
     const readiness = window.AnalyticsEngine.calculateReadiness(telemetry, hwStatus, personInView, camActive);
     this._renderReadinessScore(readiness);
 
-    // 3. Render 8 Sensor Readout Cards
+    // 3. Render 6 Consolidated Sensor Readout Cards
     this._renderSensorCards(telemetry, isDisconnected);
-
-    // 4. Update Decision Support Panel
-    const decision = window.AnalyticsEngine.generateDecisionSupport(telemetry, hazard, readiness, hwStatus, camActive, personInView);
-    this._renderDecisionSupport(decision);
   }
 
   /**
-   * Render 8 Sensor Cards
+   * Render 6 Consolidated Sensor Cards
    */
   _renderSensorCards(t, isDisconnected) {
-    const cards = [
-      { key: 'gas', val: t.gas, unit: 'ppm / %', name: 'Toxic & Flammable Gas', icon: 'flame', desc: 'CH₄, LPG, Hydrocarbons & Combustible Gaseous Index' },
-      { key: 'co', val: t.co, unit: 'ppm', name: 'Carbon Monoxide (CO)', icon: 'wind', desc: 'Toxic Combustible Byproduct (MSHA Lethal Threshold: >100ppm)' },
-      { key: 'co2', val: t.co2, unit: 'ppm', name: 'Carbon Dioxide (CO₂)', icon: 'activity', desc: 'Asphyxiant Atmospheric Displacement Indicator' },
-      { key: 'temp', val: t.temp !== null ? t.temp.toFixed(1) : null, unit: '°C', name: 'Ambient Temperature', icon: 'thermometer', desc: 'Subterranean Thermal Envelope & Fire Sentry' },
-      { key: 'humidity', val: t.humidity !== null ? t.humidity.toFixed(0) : null, unit: '%RH', name: 'Relative Humidity', icon: 'droplets', desc: 'Adit Moisture & Condensation Level' },
-      { key: 'water', val: t.water, unit: 'mm', name: 'Water / Flood Level', icon: 'droplets', desc: 'Sump Inundation & Floor Clearance Depth' },
-      { key: 'obstacle', val: t.obstacle, unit: 'cm', name: 'Obstacle Distance', icon: 'compass', desc: 'Forward Ultrasonic LiDAR Clearance' },
-      { key: 'rover_status', val: t.rover_status, unit: '', name: 'Rover Operational State', icon: 'navigation', desc: 'Mobility Sentry & Traction Inclinometer', isStatusString: true }
+    // 1. Toxic Gases Consolidated Card
+    const gasValElem = document.getElementById('val-gas');
+    const gasBadgeElem = document.getElementById('badge-gas');
+    const gasCardElem = document.getElementById('card-gas');
+    const gasCoSubElem = document.getElementById('sub-val-co');
+    const gasCo2SubElem = document.getElementById('sub-val-co2');
+
+    if (isDisconnected || t.gas === null || t.gas === undefined) {
+      if (gasValElem) { gasValElem.innerText = '—'; gasValElem.className = 'sensor-val muted'; }
+      if (gasBadgeElem) { gasBadgeElem.className = 'status-tag tag-muted'; gasBadgeElem.innerText = 'Not connected'; }
+      if (gasCardElem) gasCardElem.className = 'sensor-card card-gas state-muted';
+      if (gasCoSubElem) gasCoSubElem.innerText = '—';
+      if (gasCo2SubElem) gasCo2SubElem.innerText = '—';
+    } else {
+      if (gasValElem) { gasValElem.innerText = `${t.gas} ppm`; gasValElem.className = 'sensor-val active'; }
+      if (gasCoSubElem) gasCoSubElem.innerText = `${t.co} ppm`;
+      if (gasCo2SubElem) gasCo2SubElem.innerText = `${t.co2} ppm`;
+
+      const gasStatus = window.AnalyticsEngine.getConsolidatedGasStatus(t.gas, t.co, t.co2);
+      if (gasBadgeElem) {
+        gasBadgeElem.className = `status-tag tag-${gasStatus.status.toLowerCase()}`;
+        gasBadgeElem.innerText = gasStatus.label;
+      }
+      if (gasCardElem) {
+        gasCardElem.className = `sensor-card card-gas state-${gasStatus.status.toLowerCase()}`;
+      }
+
+      if (gasStatus.status === 'CRITICAL') {
+        window.TacticalAudio?.playCriticalAlarm();
+      }
+    }
+
+    // 2. Temperature, Humidity, Water Level, Obstacle Cards
+    const standardCards = [
+      { key: 'temp', val: t.temp !== null ? t.temp.toFixed(1) : null, unit: '°C', cardClass: 'card-temp' },
+      { key: 'humidity', val: t.humidity !== null ? t.humidity.toFixed(0) : null, unit: '%RH', cardClass: 'card-hum' },
+      { key: 'water', val: t.water, unit: 'mm', cardClass: 'card-water' },
+      { key: 'obstacle', val: t.obstacle, unit: 'cm', cardClass: 'card-obst' }
     ];
 
-    cards.forEach(c => {
+    standardCards.forEach(c => {
       const valElem = document.getElementById(`val-${c.key}`);
       const badgeElem = document.getElementById(`badge-${c.key}`);
       const cardElem = document.getElementById(`card-${c.key}`);
-      const threshElem = document.getElementById(`thresh-${c.key}`);
 
       if (!valElem || !badgeElem) return;
-
-      const thresh = window.AnalyticsEngine.thresholds[c.key];
-      if (threshElem && thresh) {
-        threshElem.innerText = `Ref: Warn >${thresh.warning} | Crit >${thresh.critical} ${thresh.unit || ''}`;
-      }
 
       if (isDisconnected || c.val === null || c.val === undefined) {
         valElem.innerText = '—';
         valElem.className = 'sensor-val muted';
         badgeElem.className = 'status-tag tag-muted';
-        badgeElem.innerText = 'AWAITING DATA';
-        if (cardElem) cardElem.className = 'sensor-card state-muted';
+        badgeElem.innerText = 'Not connected';
+        if (cardElem) cardElem.className = `sensor-card ${c.cardClass} state-muted`;
       } else {
-        if (c.isStatusString) {
-          valElem.innerText = c.val.toString().toUpperCase();
-          valElem.className = 'sensor-val normal';
-          badgeElem.className = 'status-tag tag-safe';
-          badgeElem.innerText = 'ACTIVE';
-          if (cardElem) cardElem.className = 'sensor-card state-safe';
-        } else {
-          valElem.innerText = `${c.val} ${c.unit}`;
-          valElem.className = 'sensor-val active';
-          
-          const status = window.AnalyticsEngine.getMetricStatus(c.key, parseFloat(c.val));
-          badgeElem.className = `status-tag tag-${status.status.toLowerCase()}`;
-          badgeElem.innerText = status.label;
+        valElem.innerText = `${c.val} ${c.unit}`;
+        valElem.className = 'sensor-val active';
+        
+        const status = window.AnalyticsEngine.getMetricStatus(c.key, parseFloat(c.val));
+        badgeElem.className = `status-tag tag-${status.status.toLowerCase()}`;
+        badgeElem.innerText = status.label;
 
-          if (cardElem) {
-            cardElem.className = `sensor-card state-${status.status.toLowerCase()}`;
-          }
-
-          // Trigger audio if critical
-          if (status.status === 'CRITICAL' && (c.key === 'gas' || c.key === 'co')) {
-            window.TacticalAudio?.playCriticalAlarm();
-          }
+        if (cardElem) {
+          cardElem.className = `sensor-card ${c.cardClass} state-${status.status.toLowerCase()}`;
         }
       }
     });
+
+    // 3. Rover Status Card (IMU Speed & Tilt Monitoring)
+    this._renderRoverStatusCard(t, isDisconnected);
+  }
+
+  /**
+   * Render Rover Status Card with IMU Speed, Tilt, and Bottom-Right Warning
+   */
+  _renderRoverStatusCard(t, isDisconnected) {
+    const badgeElem = document.getElementById('badge-rover_status');
+    const cardElem = document.getElementById('card-rover_status');
+    const speedValElem = document.getElementById('rover-val-speed');
+    const tiltValElem = document.getElementById('rover-val-tilt');
+    const warnIconElem = document.getElementById('rover-card-warn-icon');
+
+    if (isDisconnected || t.speed === null || t.speed === undefined) {
+      if (speedValElem) { speedValElem.innerText = '—'; speedValElem.className = 'metric-val muted'; }
+      if (tiltValElem) { tiltValElem.innerText = '—'; tiltValElem.className = 'metric-val muted'; }
+      if (badgeElem) { badgeElem.className = 'status-tag tag-muted'; badgeElem.innerText = 'Not connected'; }
+      if (cardElem) cardElem.className = 'sensor-card card-rover state-muted';
+      if (warnIconElem) warnIconElem.classList.remove('active');
+      window.UI.hideRoverWarningToast();
+      return;
+    }
+
+    const speedStr = `${parseFloat(t.speed).toFixed(2)} m/s`;
+    const tiltStr = `${Math.abs(parseFloat(t.tilt)).toFixed(1)}°`;
+
+    if (speedValElem) { speedValElem.innerText = speedStr; speedValElem.className = 'metric-val'; }
+    if (tiltValElem) { tiltValElem.innerText = tiltStr; tiltValElem.className = 'metric-val'; }
+
+    // Evaluate IMU threshold conditions
+    const imuStatus = window.AnalyticsEngine.evaluateRoverIMU(t.speed, t.tilt);
+
+    if (imuStatus.hasWarning) {
+      if (badgeElem) {
+        badgeElem.className = `status-tag tag-${imuStatus.status.toLowerCase()}`;
+        badgeElem.innerText = imuStatus.warningType === 'BOTH' ? 'CRITICAL IMU' : `${imuStatus.warningType} WARN`;
+      }
+      if (cardElem) {
+        cardElem.className = `sensor-card card-rover state-${imuStatus.status.toLowerCase()}`;
+      }
+
+      // Show small yellow warning icon in bottom-right of Rover Status card
+      if (warnIconElem) warnIconElem.classList.add('active');
+
+      // Show popup toast in bottom-right of webpage
+      window.UI.showRoverWarningToast(imuStatus.message);
+
+      // Rate-limited timeline log (once every 10s per condition)
+      const now = Date.now();
+      if (now - this.lastRoverWarnTime > 10000) {
+        window.Telemetry.logEvent('ROVER', imuStatus.message, imuStatus.status === 'CRITICAL' ? 'CRITICAL' : 'WARNING');
+        this.lastRoverWarnTime = now;
+      }
+    } else {
+      if (badgeElem) {
+        badgeElem.className = 'status-tag tag-safe';
+        badgeElem.innerText = 'NORMAL';
+      }
+      if (cardElem) {
+        cardElem.className = 'sensor-card card-rover state-safe';
+      }
+      if (warnIconElem) warnIconElem.classList.remove('active');
+      window.UI.hideRoverWarningToast();
+    }
   }
 
   /**
    * Render Consolidated Hazard Assessment
    */
   _renderHazardAssessment(hazard) {
-    const statusPill = document.getElementById('hazard-status-pill');
     const hazardList = document.getElementById('active-hazards-list');
     const actionText = document.getElementById('hazard-recommended-action');
     const container = document.getElementById('hazard-assessment-panel');
-
-    if (statusPill) {
-      statusPill.className = `hazard-pill-badge pill-${hazard.level.toLowerCase()}`;
-      statusPill.innerText = hazard.levelLabel;
-    }
 
     if (actionText) {
       actionText.innerText = hazard.primaryAction;
     }
 
     if (container) {
-      container.className = `tactical-panel panel-hazard hazard-${hazard.level.toLowerCase()}`;
+      container.className = `tactical-panel panel-earth panel-hazard hazard-${hazard.level.toLowerCase()}`;
     }
 
     if (hazardList) {
       if (hazard.activeHazards.length === 0) {
         hazardList.innerHTML = `
           <div class="no-hazards-notice">
-            ${window.renderIcon('checkCircle', 16, 'text-safe')}
-            <span>${hazard.isDisconnected ? 'Awaiting rover connection for hazard assessment' : 'No active threshold breaches detected in operational sector.'}</span>
+            ${window.renderIcon('checkCircle', 18, 'text-safe')}
+            <span>${hazard.isDisconnected ? 'Connect rover hardware to evaluate live atmospheric hazards.' : 'Atmospheric conditions nominal across all safety parameters.'}</span>
           </div>
         `;
       } else {
@@ -217,7 +274,7 @@ class AppOrchestrator {
         hazard.activeHazards.forEach(h => {
           html += `
             <div class="hazard-item-chip chip-${h.severity.toLowerCase()}">
-              <span class="chip-icon">${window.renderIcon('alertTriangle', 14)}</span>
+              <span class="chip-icon">${window.renderIcon('alertTriangle', 16)}</span>
               <div class="chip-content">
                 <strong>${h.title}</strong>
                 <span>${h.description}</span>
@@ -237,7 +294,6 @@ class AppOrchestrator {
     const scoreVal = document.getElementById('readiness-score-val');
     const scoreStatus = document.getElementById('readiness-status-badge');
     const scoreBar = document.getElementById('readiness-progress-fill');
-    const container = document.getElementById('readiness-panel');
 
     if (scoreVal) {
       scoreVal.innerText = readiness.score !== null ? `${readiness.score}%` : '— %';
@@ -279,23 +335,6 @@ class AppOrchestrator {
   }
 
   /**
-   * Render Decision Support Panel
-   */
-  _renderDecisionSupport(d) {
-    const sitElem = document.getElementById('ds-situation');
-    const envElem = document.getElementById('ds-environmental');
-    const commElem = document.getElementById('ds-communication');
-    const camElem = document.getElementById('ds-camera');
-    const actElem = document.getElementById('ds-action');
-
-    if (sitElem) sitElem.innerText = d.situation;
-    if (envElem) envElem.innerText = d.environmental;
-    if (commElem) commElem.innerText = d.communication;
-    if (camElem) camElem.innerText = d.camera;
-    if (actElem) actElem.innerText = d.action;
-  }
-
-  /**
    * Navigation Tabs (Page 1 vs Page 2)
    */
   _bindNavigationTabs() {
@@ -326,76 +365,7 @@ class AppOrchestrator {
   }
 
   /**
-   * Explicit Demo Bench Test Mode Toggle
-   */
-  _bindDemoModeToggle() {
-    const toggle = document.getElementById('demo-mode-toggle');
-    const banner = document.getElementById('demo-mode-banner');
-
-    if (toggle) {
-      toggle.addEventListener('change', (e) => {
-        this.isDemoMode = toggle.checked;
-        if (banner) {
-          banner.style.display = this.isDemoMode ? 'flex' : 'none';
-        }
-
-        if (this.isDemoMode) {
-          this._startDemoDataGenerator();
-          window.Telemetry.logEvent('SYSTEM', 'BENCH TEST DEMO MODE ACTIVATED (Simulated Live Hardware Telemetry Stream)', 'WARNING');
-        } else {
-          this._stopDemoDataGenerator();
-          window.Telemetry.setAwaitingConnection();
-          window.Telemetry.logEvent('SYSTEM', 'Demo mode deactivated. Reverted to strict hardware ground truth.', 'INFO');
-        }
-      });
-    }
-  }
-
-  _startDemoDataGenerator() {
-    let tGas = 80;
-    let tCo = 12;
-    let tCo2 = 480;
-    let tTemp = 24.2;
-    let tHum = 58;
-    let tWater = 0;
-    let tDist = 110;
-
-    this.demoInterval = setInterval(() => {
-      // Gentle realistic drift
-      tGas = Math.max(40, Math.min(650, tGas + (Math.sin(Date.now() / 4000) * 15)));
-      tCo = Math.max(2, Math.min(120, tCo + (Math.cos(Date.now() / 5000) * 3)));
-      tCo2 = Math.max(400, Math.min(1800, tCo2 + (Math.sin(Date.now() / 7000) * 20)));
-      tTemp = Math.max(20, Math.min(45, tTemp + (Math.sin(Date.now() / 10000) * 0.2)));
-      tHum = Math.max(40, Math.min(95, tHum + (Math.cos(Date.now() / 8000) * 0.5)));
-      tDist = Math.max(10, Math.min(180, tDist + (Math.sin(Date.now() / 3000) * 8)));
-
-      const sample = {
-        gas: Math.round(tGas),
-        co: Math.round(tCo),
-        co2: Math.round(tCo2),
-        temp: Math.round(tTemp * 10) / 10,
-        humidity: Math.round(tHum),
-        water: tWater,
-        obstacle: Math.round(tDist),
-        rover_status: 'EXPLORING',
-        timestamp: Date.now()
-      };
-
-      window.Telemetry.update(sample);
-      this.lastPacketPulseTime = Date.now();
-      this._pulseTelemetryScanline();
-    }, 600);
-  }
-
-  _stopDemoDataGenerator() {
-    if (this.demoInterval) {
-      clearInterval(this.demoInterval);
-      this.demoInterval = null;
-    }
-  }
-
-  /**
-   * Video Controls & Source Switcher
+   * Single Video Panel Controls: ROVER CAM vs PC CAM Switcher
    */
   _bindVideoControls() {
     const srcSelect = document.getElementById('camera-source-select');
@@ -420,60 +390,7 @@ class AppOrchestrator {
   }
 
   /**
-   * Hardware Connection Modal Handlers
-   */
-  _bindHardwareModalActions() {
-    const connectSerialBtn = document.getElementById('btn-connect-serial');
-    const connectWsBtn = document.getElementById('btn-connect-ws');
-    const disconnectBtn = document.getElementById('btn-disconnect-hw');
-    const baudSelect = document.getElementById('hw-baud-select');
-    const wsInput = document.getElementById('hw-ws-url');
-
-    if (connectSerialBtn) {
-      connectSerialBtn.addEventListener('click', async () => {
-        try {
-          const baud = baudSelect ? baudSelect.value : 115200;
-          await window.HardwareManager.connectSerial(baud);
-          document.getElementById('hw-modal')?.classList.remove('active');
-        } catch (err) {
-          alert(`Serial Connect Failed: ${err.message}`);
-        }
-      });
-    }
-
-    if (connectWsBtn) {
-      connectWsBtn.addEventListener('click', () => {
-        try {
-          const url = wsInput ? wsInput.value.trim() : 'ws://192.168.4.1:81';
-          window.HardwareManager.connectWebSocket(url);
-          document.getElementById('hw-modal')?.classList.remove('active');
-        } catch (err) {
-          alert(`WebSocket Connect Failed: ${err.message}`);
-        }
-      });
-    }
-
-    if (disconnectBtn) {
-      disconnectBtn.addEventListener('click', async () => {
-        await window.HardwareManager.disconnect();
-      });
-    }
-
-    // Parser Tester in Modal
-    const parseTestBtn = document.getElementById('test-parser-btn');
-    const parseTestInput = document.getElementById('test-parser-input');
-    const parseTestOutput = document.getElementById('test-parser-output');
-    if (parseTestBtn && parseTestInput && parseTestOutput) {
-      parseTestBtn.addEventListener('click', () => {
-        const line = parseTestInput.value.trim();
-        const res = window.HardwareManager.parseSensorLine(line);
-        parseTestOutput.innerText = JSON.stringify(res, null, 2);
-      });
-    }
-  }
-
-  /**
-   * Thresholds Settings Form
+   * Thresholds Settings Form & View Graph Triggers
    */
   _bindThresholdForm() {
     const form = document.getElementById('thresholds-form');
@@ -497,7 +414,7 @@ class AppOrchestrator {
       });
     }
 
-    // Attach "View Graph" triggers on all cards
+    // Attach "View Graph" triggers to all cards including Rover Status
     document.querySelectorAll('.btn-view-graph').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -505,13 +422,24 @@ class AppOrchestrator {
         window.UI.openGraph(metric);
       });
     });
+
+    // Also clicking any sensor card body opens its graph
+    document.querySelectorAll('.sensor-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return; // Ignore if clicked on button directly
+        const graphBtn = card.querySelector('.btn-view-graph');
+        if (graphBtn) {
+          const metric = graphBtn.getAttribute('data-metric');
+          if (metric) window.UI.openGraph(metric);
+        }
+      });
+    });
   }
 
   /**
-   * Page 2 Simulator Controls & Telemetry Sink
+   * Page 2 Simulator Controls
    */
   _bindSimulatorControls() {
-    // Scenario buttons
     document.querySelectorAll('.sim-scenario-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.sim-scenario-btn').forEach(b => b.classList.remove('active'));
@@ -522,7 +450,6 @@ class AppOrchestrator {
       });
     });
 
-    // Sliders
     const sliders = ['gas', 'co', 'temp', 'humidity', 'water', 'obstacle'];
     sliders.forEach(s => {
       const slider = document.getElementById(`sim-slider-${s}`);
@@ -536,7 +463,6 @@ class AppOrchestrator {
       }
     });
 
-    // Simulator telemetry update listener
     window.RescueSimulator.subscribe((params, rover, events) => {
       this._renderSimulatedTelemetry(params);
       this._renderSimulatedTimeline(events);
@@ -567,9 +493,9 @@ class AppOrchestrator {
     events.slice(0, 30).forEach(evt => {
       const timeStr = new Date(evt.timestamp).toTimeString().substring(0, 8);
       html += `
-        <div class="sim-log-entry sev-${evt.severity.toLowerCase()}">
+        <div class="timeline-entry sev-${evt.severity.toLowerCase()}">
           <span class="entry-time">[${timeStr}]</span>
-          <span class="entry-tag">SIM</span>
+          <span class="status-tag tag-warn">SIMULATED</span>
           <span class="entry-msg">${evt.message}</span>
         </div>
       `;
@@ -582,14 +508,12 @@ class AppOrchestrator {
    */
   _startClocks() {
     setInterval(() => {
-      // 1. Clock
       const now = new Date();
       const clockElem = document.getElementById('system-clock-time');
       if (clockElem) {
-        clockElem.innerText = now.toTimeString().substring(0, 8) + ' UTC' + (now.getTimezoneOffset() > 0 ? '-' : '+') + Math.abs(now.getTimezoneOffset() / 60);
+        clockElem.innerText = now.toTimeString().substring(0, 8);
       }
 
-      // 2. Uptime
       const uptimeSec = Math.floor((Date.now() - this.startTime) / 1000);
       const hrs = Math.floor(uptimeSec / 3600).toString().padStart(2, '0');
       const mins = Math.floor((uptimeSec % 3600) / 60).toString().padStart(2, '0');
@@ -597,13 +521,10 @@ class AppOrchestrator {
       const uptimeElem = document.getElementById('system-uptime-val');
       if (uptimeElem) uptimeElem.innerText = `${hrs}:${mins}:${secs}`;
 
-      // 3. Last packet age
       const lastRxElem = document.getElementById('last-packet-age');
       if (lastRxElem) {
-        if (this.isDemoMode) {
-          lastRxElem.innerText = 'BENCH (0.6s)';
-        } else if (!window.HardwareManager.stats.lastPacketTimestamp) {
-          lastRxElem.innerText = 'NO PACKETS';
+        if (!window.HardwareManager.stats.lastPacketTimestamp) {
+          lastRxElem.innerText = 'NO DATA';
         } else {
           const ageSec = ((Date.now() - window.HardwareManager.stats.lastPacketTimestamp) / 1000).toFixed(1);
           lastRxElem.innerText = `${ageSec}s ago`;
@@ -624,37 +545,22 @@ class AppOrchestrator {
     const badge = document.getElementById('hw-status-badge');
     if (!badge) return;
 
-    if (this.isDemoMode) {
-      badge.className = 'status-tag tag-warn';
-      badge.innerText = 'DEMO BENCH';
-      return;
-    }
-
     if (status === 'CONNECTED') {
       badge.className = 'status-tag tag-safe';
-      badge.innerText = `CONNECTED (${window.HardwareManager.mode.toUpperCase()})`;
+      badge.innerText = 'CONNECTED';
     } else if (status === 'STALE') {
       badge.className = 'status-tag tag-warn';
-      badge.innerText = 'TELEMETRY STALE';
+      badge.innerText = 'STALE';
     } else if (status === 'CONNECTING') {
       badge.className = 'status-tag tag-warn';
       badge.innerText = 'CONNECTING...';
     } else {
       badge.className = 'status-tag tag-muted';
-      badge.innerText = 'DISCONNECTED';
+      badge.innerText = 'NOT CONNECTED';
     }
-  }
-
-  _updateTerminalLog() {
-    const term = document.getElementById('raw-terminal-content');
-    if (!term) return;
-    const logs = window.HardwareManager.getRawLogs();
-    term.innerText = logs.slice(-25).join('\n');
-    term.scrollTop = term.scrollHeight;
   }
 }
 
-// Bootstrap on DOM Ready
 window.addEventListener('DOMContentLoaded', () => {
   window.App = new AppOrchestrator();
   window.App.init();

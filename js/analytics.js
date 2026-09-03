@@ -1,23 +1,23 @@
 /**
  * Industrial Hazard Assessment & Rescue Operational Readiness Engine
- * Multi-criteria decision support matrix for underground mining emergencies.
+ * Real-time decision support matrix with consolidated Toxic Gases and Rover IMU condition evaluation.
  */
 class SafetyAnalyticsEngine {
   constructor() {
     this.thresholds = this._loadThresholds();
-    this.prevHazardLevel = null;
-    this.prevReadiness = null;
   }
 
   _loadThresholds() {
     const defaults = {
-      gas: { warning: 250, critical: 500, unit: 'ppm / %' },
+      gas: { warning: 250, critical: 500, unit: 'ppm' },
       co: { warning: 35, critical: 100, unit: 'ppm' },
       co2: { warning: 1000, critical: 2500, unit: 'ppm' },
       temp: { warning: 38.0, critical: 50.0, unit: '°C' },
       humidity: { warning: 85.0, critical: 95.0, unit: '%RH' },
       water: { warning: 25.0, critical: 65.0, unit: 'mm' },
-      obstacle: { warning: 35.0, critical: 15.0, unit: 'cm' } // Low is critical
+      obstacle: { warning: 35.0, critical: 15.0, unit: 'cm' },
+      speed: { warning: 1.0, critical: 1.8, unit: 'm/s' },
+      tilt: { warning: 20.0, critical: 35.0, unit: '°' }
     };
 
     try {
@@ -46,20 +46,107 @@ class SafetyAnalyticsEngine {
     const t = this.thresholds[metricKey];
     if (!t) return { status: 'SAFE', label: 'NORMAL', color: 'var(--status-safe)' };
 
-    // Obstacle is inverted (lower distance = higher hazard)
     if (metricKey === 'obstacle') {
       if (value <= t.critical) return { status: 'CRITICAL', label: 'COLLISION RISK', color: 'var(--status-critical)' };
       if (value <= t.warning) return { status: 'WARNING', label: 'PROXIMITY CAUTION', color: 'var(--status-warning)' };
       return { status: 'SAFE', label: 'CLEAR', color: 'var(--status-safe)' };
     }
 
-    if (value >= t.critical) return { status: 'CRITICAL', label: 'CRITICAL HAZARD', color: 'var(--status-critical)' };
-    if (value >= t.warning) return { status: 'WARNING', label: 'ELEVATED / CAUTION', color: 'var(--status-warning)' };
-    return { status: 'SAFE', label: 'NORMAL / SAFE', color: 'var(--status-safe)' };
+    if (value >= t.critical) return { status: 'CRITICAL', label: 'CRITICAL', color: 'var(--status-critical)' };
+    if (value >= t.warning) return { status: 'WARNING', label: 'CAUTION', color: 'var(--status-warning)' };
+    return { status: 'SAFE', label: 'SAFE', color: 'var(--status-safe)' };
   }
 
   /**
-   * Perform comprehensive hazard assessment
+   * Evaluates Consolidated Toxic Gases Card status (combines Gas, CO, and CO2)
+   */
+  getConsolidatedGasStatus(gas, co, co2) {
+    if (gas === null || gas === undefined) {
+      return { status: 'NO_DATA', label: 'Awaiting data', color: 'var(--status-muted)' };
+    }
+
+    const statGas = this.getMetricStatus('gas', gas);
+    const statCo = this.getMetricStatus('co', co);
+    const statCo2 = this.getMetricStatus('co2', co2);
+
+    if (statGas.status === 'CRITICAL' || statCo.status === 'CRITICAL' || statCo2.status === 'CRITICAL') {
+      return { status: 'CRITICAL', label: 'CRITICAL TOXIC GAS', color: 'var(--status-critical)' };
+    }
+    if (statGas.status === 'WARNING' || statCo.status === 'WARNING' || statCo2.status === 'WARNING') {
+      return { status: 'WARNING', label: 'ELEVATED GAS', color: 'var(--status-warning)' };
+    }
+    return { status: 'SAFE', label: 'SAFE', color: 'var(--status-safe)' };
+  }
+
+  /**
+   * Evaluate Rover IMU Speed and Tilt condition for threshold warnings
+   */
+  evaluateRoverIMU(speed, tilt) {
+    if (speed === null || speed === undefined || isNaN(speed)) {
+      return {
+        hasWarning: false,
+        warningType: 'NONE',
+        message: '',
+        status: 'NO_DATA'
+      };
+    }
+
+    const isSpeedCrit = (speed >= this.thresholds.speed.critical);
+    const isSpeedWarn = (speed >= this.thresholds.speed.warning);
+    const isTiltCrit = (Math.abs(tilt) >= this.thresholds.tilt.critical);
+    const isTiltWarn = (Math.abs(tilt) >= this.thresholds.tilt.warning);
+
+    if (isSpeedCrit && isTiltCrit) {
+      return {
+        hasWarning: true,
+        warningType: 'BOTH',
+        message: 'Warning: Rover accelerating excessively and abnormal tilt detected.',
+        status: 'CRITICAL'
+      };
+    }
+    if (isTiltCrit) {
+      return {
+        hasWarning: true,
+        warningType: 'TILT',
+        message: 'Warning: Abnormal rover tilt detected (exceeds safe rollover limit).',
+        status: 'CRITICAL'
+      };
+    }
+    if (isSpeedCrit) {
+      return {
+        hasWarning: true,
+        warningType: 'SPEED',
+        message: 'Warning: Linear speed above critical safety threshold.',
+        status: 'CRITICAL'
+      };
+    }
+    if (isTiltWarn) {
+      return {
+        hasWarning: true,
+        warningType: 'TILT',
+        message: 'Warning: Rover tilt angle outside nominal safe range.',
+        status: 'WARNING'
+      };
+    }
+    if (isSpeedWarn) {
+      return {
+        hasWarning: true,
+        warningType: 'SPEED',
+        message: 'Warning: Rover accelerating too fast on uneven terrain.',
+        status: 'WARNING'
+      };
+    }
+
+    return {
+      hasWarning: false,
+      warningType: 'NONE',
+      message: '',
+      status: 'SAFE'
+    };
+  }
+
+  /**
+   * Perform concise hazard assessment
    */
   evaluateHazards(telemetry, hardwareStatus = 'CONNECTED') {
     if (!telemetry || hardwareStatus === 'DISCONNECTED' || telemetry.gas === null) {
@@ -68,7 +155,7 @@ class SafetyAnalyticsEngine {
         levelLabel: 'AWAITING TELEMETRY',
         color: 'var(--status-muted)',
         activeHazards: [],
-        primaryAction: 'Establish rover serial/Wi-Fi communication link to commence atmospheric hazard assessment.',
+        primaryAction: 'Connect rover hardware to evaluate live atmospheric hazards.',
         isDisconnected: true
       };
     }
@@ -77,21 +164,21 @@ class SafetyAnalyticsEngine {
     let hasCritical = false;
     let hasWarning = false;
 
-    // 1. Toxic & Flammable Gas
+    // 1. Toxic / Combustible Gas
     if (telemetry.gas >= this.thresholds.gas.critical) {
       hasCritical = true;
       activeHazards.push({
         id: 'gas_crit',
-        title: 'Explosive / Toxic Gas Accumulation',
-        description: `Gas level at ${telemetry.gas} ppm exceeds critical threshold (${this.thresholds.gas.critical} ppm).`,
+        title: 'Critical Combustible / Toxic Gas',
+        description: `Gas level ${telemetry.gas} ppm exceeds limit (${this.thresholds.gas.critical} ppm).`,
         severity: 'CRITICAL'
       });
     } else if (telemetry.gas >= this.thresholds.gas.warning) {
       hasWarning = true;
       activeHazards.push({
         id: 'gas_warn',
-        title: 'Elevated Combustible Gas Index',
-        description: `Gas level at ${telemetry.gas} ppm exceeds reference caution threshold (${this.thresholds.gas.warning} ppm).`,
+        title: 'Elevated Gas Index',
+        description: `Gas concentration ${telemetry.gas} ppm above baseline.`,
         severity: 'WARNING'
       });
     }
@@ -101,8 +188,8 @@ class SafetyAnalyticsEngine {
       hasCritical = true;
       activeHazards.push({
         id: 'co_crit',
-        title: 'Lethal Carbon Monoxide Concentration',
-        description: `CO at ${telemetry.co} ppm is lethal within short exposure times (threshold: ${this.thresholds.co.critical} ppm).`,
+        title: 'Lethal Carbon Monoxide (CO)',
+        description: `CO level at ${telemetry.co} ppm is life-threatening.`,
         severity: 'CRITICAL'
       });
     } else if (telemetry.co >= this.thresholds.co.warning) {
@@ -110,74 +197,47 @@ class SafetyAnalyticsEngine {
       activeHazards.push({
         id: 'co_warn',
         title: 'Moderate CO Accumulation',
-        description: `CO level at ${telemetry.co} ppm requires SCBA gear for any human entry.`,
+        description: `CO level at ${telemetry.co} ppm. SCBA gear required.`,
         severity: 'WARNING'
       });
     }
 
-    // 3. Carbon Dioxide (CO2)
-    if (telemetry.co2 >= this.thresholds.co2.critical) {
-      hasCritical = true;
-      activeHazards.push({
-        id: 'co2_crit',
-        title: 'Asphyxiation Hazard (High CO₂)',
-        description: `CO₂ at ${telemetry.co2} ppm indicates severe ventilation deficiency.`,
-        severity: 'CRITICAL'
-      });
-    } else if (telemetry.co2 >= this.thresholds.co2.warning) {
-      hasWarning = true;
-      activeHazards.push({
-        id: 'co2_warn',
-        title: 'Elevated CO₂ Concentration',
-        description: `CO₂ at ${telemetry.co2} ppm above standard subterranean baseline.`,
-        severity: 'WARNING'
-      });
-    }
-
-    // 4. Water / Flood
+    // 3. Water / Flood
     if (telemetry.water >= this.thresholds.water.critical) {
       hasCritical = true;
       activeHazards.push({
         id: 'water_crit',
-        title: 'Critical Tunnel Inundation / Flooding',
-        description: `Water depth at ${telemetry.water} mm impairs ground transit and indicates active ingress.`,
+        title: 'Adit Flooding Inundation',
+        description: `Water depth ${telemetry.water} mm impairs rover track transit.`,
         severity: 'CRITICAL'
       });
     } else if (telemetry.water >= this.thresholds.water.warning) {
       hasWarning = true;
       activeHazards.push({
         id: 'water_warn',
-        title: 'Water Accumulation in Adit',
-        description: `Water level at ${telemetry.water} mm. Sump pump capacity check recommended.`,
+        title: 'Water Ingress Caution',
+        description: `Water accumulation at ${telemetry.water} mm.`,
         severity: 'WARNING'
       });
     }
 
-    // 5. Thermal Stress
+    // 4. Thermal
     if (telemetry.temp >= this.thresholds.temp.critical) {
       hasCritical = true;
       activeHazards.push({
         id: 'temp_crit',
-        title: 'Extreme Heat / Subsurface Fire Risk',
-        description: `Ambient temp ${telemetry.temp}°C indicates potential fire or secondary thermal reaction.`,
+        title: 'Extreme Heat / Fire Sentry',
+        description: `Shaft temperature at ${telemetry.temp}°C.`,
         severity: 'CRITICAL'
-      });
-    } else if (telemetry.temp >= this.thresholds.temp.warning) {
-      hasWarning = true;
-      activeHazards.push({
-        id: 'temp_warn',
-        title: 'Elevated Shaft Temperature',
-        description: `Ambient temp ${telemetry.temp}°C presents heat exhaustion hazard.`,
-        severity: 'WARNING'
       });
     }
 
-    // 6. Obstacle
+    // 5. Obstacle
     if (telemetry.obstacle <= this.thresholds.obstacle.critical) {
       activeHazards.push({
         id: 'obst_crit',
-        title: 'Tunnel Path Blockage / Rockfall Obstacle',
-        description: `Forward clearance at ${telemetry.obstacle} cm indicates impassable rubble.`,
+        title: 'Tunnel Path Blockage',
+        description: `Obstacle clearance below ${telemetry.obstacle} cm.`,
         severity: 'WARNING'
       });
     }
@@ -185,18 +245,18 @@ class SafetyAnalyticsEngine {
     let level = 'SAFE';
     let levelLabel = 'ATMOSPHERE NOMINAL';
     let color = 'var(--status-safe)';
-    let primaryAction = 'Atmospheric parameters within acceptable reference ranges. Continue planned reconnaissance sweep.';
+    let primaryAction = 'Atmospheric envelope safe. Proceed with planned reconnaissance sweep.';
 
     if (hasCritical) {
       level = 'CRITICAL';
       levelLabel = 'CRITICAL HAZARD DETECTED';
       color = 'var(--status-critical)';
-      primaryAction = 'HALT HUMAN CREW ENTRY. Deploy forced ventilation into target adit. Hold rover position or initiate autonomous fallback.';
+      primaryAction = 'HALT HUMAN CREW ADVANCE. Activate emergency adit ventilation. Hold rover position.';
     } else if (hasWarning) {
       level = 'WARNING';
       levelLabel = 'ELEVATED HAZARD / CAUTION';
       color = 'var(--status-warning)';
-      primaryAction = 'Maintain continuous telemetry sampling. Require Level-2 SCBA protection for any rescue team advance.';
+      primaryAction = 'Maintain continuous telemetry sampling. Require Level-2 SCBA protection for any advance.';
     }
 
     return {
@@ -227,104 +287,72 @@ class SafetyAnalyticsEngine {
     let baseScore = 100;
     const factors = [];
 
-    // Factor 1: Gas Toxicity & Combustibility (Max deduction: 40)
-    let gasPenalty = 0;
-    if (telemetry.gas >= this.thresholds.gas.critical) gasPenalty += 25;
-    else if (telemetry.gas >= this.thresholds.gas.warning) gasPenalty += 12;
-
-    if (telemetry.co >= this.thresholds.co.critical) gasPenalty += 25;
-    else if (telemetry.co >= this.thresholds.co.warning) gasPenalty += 10;
-
-    if (telemetry.co2 >= this.thresholds.co2.critical) gasPenalty += 15;
-    else if (telemetry.co2 >= this.thresholds.co2.warning) gasPenalty += 6;
-
-    gasPenalty = Math.min(45, gasPenalty);
-    baseScore -= gasPenalty;
-    factors.push({
-      name: 'Atmospheric Safety (Gas / CO / CO₂)',
-      weight: '35%',
-      penalty: gasPenalty > 0 ? `-${gasPenalty}%` : '0%',
-      status: gasPenalty > 20 ? 'CRITICAL' : (gasPenalty > 0 ? 'WARNING' : 'SAFE'),
-      detail: gasPenalty === 0 ? 'Atmospheric envelope safe' : `Gas indices elevated (${gasPenalty}% impact)`
-    });
-
-    // Factor 2: Flood & Inundation (Max deduction: 20)
-    let floodPenalty = 0;
-    if (telemetry.water >= this.thresholds.water.critical) floodPenalty = 20;
-    else if (telemetry.water >= this.thresholds.water.warning) floodPenalty = 10;
-
-    baseScore -= floodPenalty;
-    factors.push({
-      name: 'Water Level & Flood Clearance',
-      weight: '20%',
-      penalty: floodPenalty > 0 ? `-${floodPenalty}%` : '0%',
-      status: floodPenalty >= 20 ? 'CRITICAL' : (floodPenalty > 0 ? 'WARNING' : 'SAFE'),
-      detail: floodPenalty === 0 ? 'Dry / Passable terrain' : `Water depth ${telemetry.water}mm impairs mobility`
-    });
-
-    // Factor 3: Thermal & Environmental Envelope (Max deduction: 15)
-    let tempPenalty = 0;
-    if (telemetry.temp >= this.thresholds.temp.critical) tempPenalty += 15;
-    else if (telemetry.temp >= this.thresholds.temp.warning) tempPenalty += 8;
-
-    if (telemetry.humidity >= this.thresholds.humidity.critical) tempPenalty += 5;
-
-    tempPenalty = Math.min(15, tempPenalty);
-    baseScore -= tempPenalty;
-    factors.push({
-      name: 'Thermal & Humidity Envelope',
-      weight: '15%',
-      penalty: tempPenalty > 0 ? `-${tempPenalty}%` : '0%',
-      status: tempPenalty >= 15 ? 'CRITICAL' : (tempPenalty > 0 ? 'WARNING' : 'SAFE'),
-      detail: tempPenalty === 0 ? 'Nominal underground climate' : `Thermal stress: ${telemetry.temp}°C`
-    });
-
-    // Factor 4: Communication & Telemetry Health (Max deduction: 15)
-    let commPenalty = 0;
-    if (hardwareStatus === 'STALE') commPenalty = 15;
-    baseScore -= commPenalty;
-    factors.push({
-      name: 'Telemetry Link Health',
-      weight: '15%',
-      penalty: commPenalty > 0 ? `-${commPenalty}%` : '0%',
-      status: commPenalty > 0 ? 'WARNING' : 'SAFE',
-      detail: commPenalty === 0 ? 'Active real-time RX stream' : 'Telemetry packet latency elevated'
-    });
-
-    // Factor 5: Rover Path Clearance & Vision Link (Max deduction: 15)
-    let pathPenalty = 0;
-    if (telemetry.obstacle <= this.thresholds.obstacle.critical) pathPenalty += 10;
-    if (!cameraActive) pathPenalty += 5;
-
-    baseScore -= pathPenalty;
-    factors.push({
-      name: 'Path Clearance & Video Stream',
-      weight: '15%',
-      penalty: pathPenalty > 0 ? `-${pathPenalty}%` : '0%',
-      status: pathPenalty >= 10 ? 'WARNING' : 'SAFE',
-      detail: pathPenalty === 0 ? 'Path clear, video online' : (telemetry.obstacle <= this.thresholds.obstacle.critical ? 'Obstacle ahead (<15cm)' : 'Video stream standby')
-    });
-
-    // Person detected bonus / priority indicator
-    if (personDetected) {
-      factors.push({
-        name: 'Target Worker Detection (Mission Priority)',
-        weight: 'PRIORITY',
-        penalty: '+10% Focus',
-        status: 'SUCCESS',
-        detail: 'Candidate human signature detected in visual stream'
-      });
+    // Gas factor (Weight: 25%)
+    if (telemetry.gas >= this.thresholds.gas.critical) {
+      baseScore -= 25;
+      factors.push({ name: 'Toxic Gas Level', penalty: '-25%', weight: '25%', status: 'CRITICAL', detail: `Gas level at ${telemetry.gas} ppm exceeded critical cutoff.` });
+    } else if (telemetry.gas >= this.thresholds.gas.warning) {
+      baseScore -= 12;
+      factors.push({ name: 'Toxic Gas Level', penalty: '-12%', weight: '25%', status: 'WARNING', detail: `Gas level at ${telemetry.gas} ppm is elevated.` });
+    } else {
+      factors.push({ name: 'Toxic Gas Level', penalty: '0%', weight: '25%', status: 'SAFE', detail: 'Gas concentration within nominal baseline limits.' });
     }
 
-    const finalScore = Math.max(5, Math.min(100, Math.round(baseScore)));
+    // CO factor (Weight: 20%)
+    if (telemetry.co >= this.thresholds.co.critical) {
+      baseScore -= 20;
+      factors.push({ name: 'Carbon Monoxide', penalty: '-20%', weight: '20%', status: 'CRITICAL', detail: `CO concentration ${telemetry.co} ppm is life-threatening.` });
+    } else if (telemetry.co >= this.thresholds.co.warning) {
+      baseScore -= 10;
+      factors.push({ name: 'Carbon Monoxide', penalty: '-10%', weight: '20%', status: 'WARNING', detail: `CO level at ${telemetry.co} ppm.` });
+    } else {
+      factors.push({ name: 'Carbon Monoxide', penalty: '0%', weight: '20%', status: 'SAFE', detail: 'CO level nominal.' });
+    }
 
-    let status = 'OPTIMAL';
+    // Flooding factor (Weight: 20%)
+    if (telemetry.water >= this.thresholds.water.critical) {
+      baseScore -= 20;
+      factors.push({ name: 'Water & Flooding', penalty: '-20%', weight: '20%', status: 'CRITICAL', detail: `Water height ${telemetry.water} mm restricts track transit.` });
+    } else if (telemetry.water >= this.thresholds.water.warning) {
+      baseScore -= 8;
+      factors.push({ name: 'Water & Flooding', penalty: '-8%', weight: '20%', status: 'WARNING', detail: `Water ingress at ${telemetry.water} mm.` });
+    } else {
+      factors.push({ name: 'Water & Flooding', penalty: '0%', weight: '20%', status: 'SAFE', detail: 'No standing water detected in passage.' });
+    }
+
+    // Thermal factor (Weight: 15%)
+    if (telemetry.temp >= this.thresholds.temp.critical) {
+      baseScore -= 15;
+      factors.push({ name: 'Thermal Stress', penalty: '-15%', weight: '15%', status: 'CRITICAL', detail: `High shaft temperature (${telemetry.temp}°C).` });
+    } else if (telemetry.temp >= this.thresholds.temp.warning) {
+      baseScore -= 6;
+      factors.push({ name: 'Thermal Stress', penalty: '-6%', weight: '15%', status: 'WARNING', detail: `Elevated ambient temp (${telemetry.temp}°C).` });
+    } else {
+      factors.push({ name: 'Thermal Stress', penalty: '0%', weight: '15%', status: 'SAFE', detail: 'Ambient shaft temperature normal.' });
+    }
+
+    // Clearance factor (Weight: 10%)
+    if (telemetry.obstacle <= this.thresholds.obstacle.critical) {
+      baseScore -= 10;
+      factors.push({ name: 'Tunnel Clearance', penalty: '-10%', weight: '10%', status: 'CRITICAL', detail: `Path obstructed (${telemetry.obstacle} cm).` });
+    } else {
+      factors.push({ name: 'Tunnel Clearance', penalty: '0%', weight: '10%', status: 'SAFE', detail: 'Clear forward passage.' });
+    }
+
+    // Person bonus (Up to +10% urgency/relevance)
+    if (personDetected) {
+      factors.push({ name: 'Survivor Detection', penalty: '+5%', weight: 'Bonus', status: 'SAFE', detail: 'Person visual confirmation active.' });
+    }
+
+    const finalScore = Math.max(0, Math.min(100, baseScore));
+    let status = 'GO - OPTIMAL';
     let color = 'var(--status-safe)';
+
     if (finalScore < 45) {
-      status = 'RESTRICTED / NO-GO';
+      status = 'NO-GO / RESTRICTED';
       color = 'var(--status-critical)';
     } else if (finalScore < 75) {
-      status = 'CONDITIONAL / CAUTION';
+      status = 'CONDITIONAL CAUTION';
       color = 'var(--status-warning)';
     }
 
@@ -334,53 +362,7 @@ class SafetyAnalyticsEngine {
       status,
       color,
       factors,
-      disclaimer: 'Software-estimated operational readiness index based on multi-criteria telemetry matrix — not a probability of rescue success.'
-    };
-  }
-
-  /**
-   * Synthesize comprehensive decision support summary
-   */
-  generateDecisionSupport(telemetry, hazardAssessment, readiness, hardwareStatus, cameraStatus, personDetected) {
-    if (!telemetry || hardwareStatus === 'DISCONNECTED' || telemetry.gas === null) {
-      return {
-        situation: 'System on standby. No physical hardware connection established.',
-        environmental: 'Atmospheric telemetry unavailable.',
-        communication: 'Offline. Connect USB Serial or ESP32 Wi-Fi to begin.',
-        camera: cameraStatus ? 'Video stream active.' : 'Camera feed offline.',
-        action: 'Plug in Arduino / ESP32 rover to commence real-time atmospheric survey.',
-        confidence: 'N/A'
-      };
-    }
-
-    let situation = 'Rover in operational area. ';
-    if (personDetected) {
-      situation += 'URGENT: Human worker signature pinpointed in camera visual feed.';
-    } else if (hazardAssessment.level === 'CRITICAL') {
-      situation += 'CRITICAL HAZARD: Atmospheric conditions hazardous for unassisted human entry.';
-    } else if (hazardAssessment.level === 'WARNING') {
-      situation += 'CAUTION: Subterranean atmosphere elevated above normal baselines.';
-    } else {
-      situation += 'Atmospheric and physical envelope currently within acceptable parameters.';
-    }
-
-    const environmental = `Gas: ${telemetry.gas} ppm (${this.getMetricStatus('gas', telemetry.gas).label}), CO: ${telemetry.co} ppm, Temp: ${telemetry.temp}°C, Flood: ${telemetry.water} mm.`;
-    
-    const comm = hardwareStatus === 'CONNECTED' 
-      ? 'Telemetry link stable (Real-time RX, 0 packet loss).'
-      : (hardwareStatus === 'STALE' ? 'Telemetry link STALE (high packet latency detected).' : 'Communication link disconnected.');
-
-    const cam = cameraStatus 
-      ? `Live feed active with client-side AI detection (${personDetected ? 'Worker detected' : 'Scanning for workers'}).`
-      : 'Camera stream standby / offline.';
-
-    return {
-      situation,
-      environmental,
-      communication: comm,
-      camera: cam,
-      action: hazardAssessment.primaryAction,
-      confidence: `${readiness.score !== null ? readiness.score : 0}% Readiness Index`
+      disclaimer: 'Software-estimated operational index based on current atmospheric & sensor readings.'
     };
   }
 }

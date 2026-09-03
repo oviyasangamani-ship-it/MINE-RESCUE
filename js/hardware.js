@@ -1,79 +1,52 @@
 /**
- * Hardware Integration Layer
- * Web Serial API (USB) & WebSocket / HTTP client for Arduino / ESP32 rover telemetry.
- * Strict ground-truth compliance: zero synthetic data on live hardware mode.
+ * Hardware Communication & Serial Telemetry Ingestion Layer
+ * Reads directly from real Arduino / ESP32 hardware via Web Serial API or WebSocket.
+ * Parses IMU linear speed & tilt along with atmospheric sensors.
  */
 class HardwareConnectionManager {
   constructor() {
-    this.mode = 'serial'; // 'serial' | 'websocket' | 'http'
-    this.status = 'DISCONNECTED'; // 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'STALE'
     this.port = null;
     this.reader = null;
     this.readableStreamClosed = null;
-    this.ws = null;
-    this.httpInterval = null;
-    
-    // Serial config
+    this.socket = null;
+    this.status = 'DISCONNECTED'; // 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'STALE'
+    this.mode = 'serial';         // 'serial' | 'websocket'
     this.baudRate = 115200;
     this.wsUrl = 'ws://192.168.4.1:81';
-    this.httpUrl = 'http://192.168.4.1/data';
-    this.httpPollingMs = 500;
 
-    // Parser configuration
-    this.parserFormat = 'csv'; // 'csv' | 'kv' | 'json' | 'custom'
-    this.customParserCode = `// Custom parser: return telemetry object
-function parsePacket(line) {
-  const parts = line.split(',');
-  return {
-    gas: parseFloat(parts[0]),
-    co: parseFloat(parts[1]),
-    co2: parseFloat(parts[2]),
-    temp: parseFloat(parts[3]),
-    humidity: parseFloat(parts[4]),
-    water: parseFloat(parts[5]),
-    obstacle: parseFloat(parts[6]),
-    rover_status: parts[7] || 'IDLE'
-  };
-}`;
-
-    // Statistics & Heartbeat
-    this.stats = {
-      packetsReceived: 0,
-      bytesReceived: 0,
-      parseErrors: 0,
-      lastPacketTimestamp: null,
-      rxRate: 0,
-      uptimeSeconds: 0
-    };
-
-    this.rawLogBuffer = [];
-    this.maxLogLines = 200;
+    // Watchdog timing
     this.staleTimeoutMs = 3500;
     this.disconnectTimeoutMs = 7000;
-    this.heartbeatTimer = null;
-    this.listeners = new Set();
+    this.stats = {
+      packetsReceived: 0,
+      lastPacketTimestamp: null,
+      bytesReceived: 0,
+      parseErrors: 0
+    };
+
+    this.dataListeners = new Set();
     this.statusListeners = new Set();
+    this.rawLogBuffer = [];
+    this.maxLogLines = 200;
 
-    // Start background watchdog
     this._startWatchdog();
+    this._bindSystemEvents();
   }
 
-  onData(cb) {
-    this.listeners.add(cb);
-    return () => this.listeners.delete(cb);
-  }
+  _bindSystemEvents() {
+    if ('serial' in navigator) {
+      navigator.serial.addEventListener('connect', (e) => {
+        console.log('[Hardware] USB Device Attached:', e.target);
+      });
+      navigator.serial.addEventListener('disconnect', (e) => {
+        console.warn('[Hardware] USB Device Unplugged');
+        this.disconnect();
+      });
+    }
 
-  onStatusChange(cb) {
-    this.statusListeners.add(cb);
-    return () => this.statusListeners.delete(cb);
-  }
-
-  _notifyData(parsedData, rawLine) {
-    this.listeners.forEach(cb => {
-      try {
-        cb(parsedData, rawLine);
-      } catch (e) {
-        console.error('[Hardware] Listener error:', e);
+    window.addEventListener('online', () => {
+      if (this.mode === 'websocket' && this.status === 'DISCONNECTED') {
+        this.connectWebSocket().catch(() => {});
       }
     });
   }
@@ -112,53 +85,79 @@ function parsePacket(line) {
   }
 
   /**
+   * Simplified direct toggle: Connect or Disconnect hardware
+   */
+  async toggleConnect() {
+    if (this.status === 'CONNECTED' || this.status === 'CONNECTING' || this.status === 'STALE') {
+      await this.disconnect();
+      return 'DISCONNECTED';
+    }
+
+    // Attempt direct Web Serial connection first
+    if ('serial' in navigator) {
+      try {
+        await this.connectSerial();
+        return 'CONNECTED';
+      } catch (err) {
+        console.warn('[Hardware] Serial connection cancelled/failed:', err.message);
+        // Fallback to local Wi-Fi WebSocket if serial was cancelled
+        try {
+          this.connectWebSocket();
+          return 'CONNECTING';
+        } catch (wsErr) {
+          this._setStatus('DISCONNECTED');
+          throw err;
+        }
+      }
+    } else {
+      // Fallback for browsers without Web Serial: try local WebSocket
+      this.connectWebSocket();
+      return 'CONNECTING';
+    }
+  }
+
+  /**
    * Connect via Web Serial API
    */
   async connectSerial(customBaud = null) {
     if (!('serial' in navigator)) {
-      throw new Error('Web Serial API is not supported in this browser. Please use Google Chrome, Edge, or Opera on desktop.');
+      throw new Error('Web Serial API is not supported in this browser. Use Chrome, Edge, or Brave.');
     }
 
     if (customBaud) this.baudRate = parseInt(customBaud, 10);
+    this.mode = 'serial';
     this._setStatus('CONNECTING');
 
     try {
       this.port = await navigator.serial.requestPort();
       await this.port.open({ baudRate: this.baudRate });
+
+      this._appendRawLog(`Serial port opened at ${this.baudRate} baud.`);
       this._setStatus('CONNECTED');
-      this._appendRawLog(`[SYSTEM] Web Serial port opened at ${this.baudRate} baud.`);
-      
       this._readSerialStream();
-      return true;
     } catch (err) {
       this._setStatus('DISCONNECTED');
-      this._appendRawLog(`[ERROR] Serial connection failed: ${err.message}`);
+      this._appendRawLog(`Serial connection error: ${err.message}`);
       throw err;
     }
   }
 
-  /**
-   * Read incoming chunks from Web Serial stream line-by-line
-   */
   async _readSerialStream() {
     const textDecoder = new TextDecoderStream();
     this.readableStreamClosed = this.port.readable.pipeTo(textDecoder.writable);
     this.reader = textDecoder.readable.getReader();
 
-    let lineBuffer = '';
+    let buffer = '';
 
     try {
       while (true) {
         const { value, done } = await this.reader.read();
-        if (done) {
-          break;
-        }
+        if (done) break;
         if (value) {
           this.stats.bytesReceived += value.length;
-          lineBuffer += value;
-          
-          let lines = lineBuffer.split(/\r\n|\n|\r/);
-          lineBuffer = lines.pop(); // Keep partial line
+          buffer += value;
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop(); // Retain incomplete line
 
           for (const line of lines) {
             const clean = line.trim();
@@ -169,121 +168,97 @@ function parsePacket(line) {
         }
       }
     } catch (err) {
-      console.warn('[Hardware] Serial stream read ended:', err);
-      this._appendRawLog(`[WARN] Serial stream interrupted: ${err.message}`);
-    } finally {
-      this._setStatus('DISCONNECTED');
-      if (this.reader) {
-        try { this.reader.releaseLock(); } catch (e) {}
+      if (this.status !== 'DISCONNECTED') {
+        console.error('[Hardware] Serial stream read error:', err);
+        this._appendRawLog(`Stream read error: ${err.message}`);
       }
+    } finally {
+      if (this.reader) {
+        this.reader.releaseLock();
+      }
+      this.disconnect();
     }
   }
 
   /**
-   * Connect via WebSocket (ESP32 Wi-Fi)
+   * Connect via WebSocket (ESP32 Wi-Fi Local Access Point)
    */
-  connectWebSocket(url) {
+  connectWebSocket(url = null) {
     if (url) this.wsUrl = url;
+    this.mode = 'websocket';
     this._setStatus('CONNECTING');
-    this._appendRawLog(`[SYSTEM] Connecting to WebSocket ${this.wsUrl}...`);
+    this._appendRawLog(`Connecting to WebSocket: ${this.wsUrl}...`);
 
     try {
-      if (this.ws) {
-        this.ws.close();
+      if (this.socket) {
+        this.socket.close();
       }
-      this.ws = new WebSocket(this.wsUrl);
 
-      this.ws.onopen = () => {
+      this.socket = new WebSocket(this.wsUrl);
+
+      this.socket.onopen = () => {
         this._setStatus('CONNECTED');
-        this._appendRawLog(`[SYSTEM] WebSocket connected to ${this.wsUrl}`);
+        this._appendRawLog(`WebSocket connected to ${this.wsUrl}`);
       };
 
-      this.ws.onmessage = (event) => {
-        const text = event.data;
-        if (typeof text === 'string') {
-          this.stats.bytesReceived += text.length;
-          const clean = text.trim();
-          if (clean.length > 0) {
-            this._handleIncomingLine(clean);
+      this.socket.onmessage = (event) => {
+        if (typeof event.data === 'string') {
+          this.stats.bytesReceived += event.data.length;
+          const lines = event.data.split(/\r?\n/);
+          for (const line of lines) {
+            const clean = line.trim();
+            if (clean.length > 0) {
+              this._handleIncomingLine(clean);
+            }
           }
         }
       };
 
-      this.ws.onerror = (err) => {
-        this._appendRawLog(`[ERROR] WebSocket error: ${err.message || 'Connection refused'}`);
+      this.socket.onerror = (err) => {
+        console.warn('[Hardware] WebSocket error:', err);
+        this._appendRawLog(`WebSocket error encountered`);
       };
 
-      this.ws.onclose = () => {
-        this._setStatus('DISCONNECTED');
-        this._appendRawLog(`[SYSTEM] WebSocket closed.`);
+      this.socket.onclose = () => {
+        if (this.status !== 'DISCONNECTED') {
+          this._setStatus('DISCONNECTED');
+          this._appendRawLog('WebSocket connection closed.');
+        }
       };
-      return true;
     } catch (err) {
       this._setStatus('DISCONNECTED');
-      this._appendRawLog(`[ERROR] WebSocket failed: ${err.message}`);
+      this._appendRawLog(`WebSocket setup error: ${err.message}`);
       throw err;
     }
   }
 
-  /**
-   * Connect via HTTP Polling
-   */
-  startHttpPolling(url, intervalMs = 500) {
-    if (url) this.httpUrl = url;
-    this.httpPollingMs = intervalMs;
-    this._setStatus('CONNECTING');
-    this._appendRawLog(`[SYSTEM] Starting HTTP telemetry polling: ${this.httpUrl} (${this.httpPollingMs}ms)`);
-
-    if (this.httpInterval) clearInterval(this.httpInterval);
-
-    const poll = async () => {
-      try {
-        const res = await fetch(this.httpUrl, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        this.stats.bytesReceived += text.length;
-        this._handleIncomingLine(text.trim());
-        this._setStatus('CONNECTED');
-      } catch (err) {
-        // HTTP request failed
-        if (this.status === 'CONNECTED') {
-          this._setStatus('STALE');
-        }
-      }
-    };
-
-    poll();
-    this.httpInterval = setInterval(poll, this.httpPollingMs);
-  }
-
-  /**
-   * Disconnect any active hardware interface
-   */
   async disconnect() {
-    this._appendRawLog(`[SYSTEM] Disconnecting active hardware interface...`);
-
-    if (this.httpInterval) {
-      clearInterval(this.httpInterval);
-      this.httpInterval = null;
-    }
-
-    if (this.ws) {
-      try { this.ws.close(); } catch (e) {}
-      this.ws = null;
-    }
+    const wasConnected = (this.status === 'CONNECTED' || this.status === 'CONNECTING');
+    this._setStatus('DISCONNECTED');
 
     if (this.reader) {
-      try { await this.reader.cancel(); } catch (e) {}
-      this.reader = null;
+      try {
+        await this.reader.cancel();
+      } catch (e) {}
     }
 
     if (this.port) {
-      try { await this.port.close(); } catch (e) {}
+      try {
+        await this.port.close();
+      } catch (e) {}
       this.port = null;
     }
 
-    this._setStatus('DISCONNECTED');
-    this._appendRawLog(`[SYSTEM] Hardware disconnected.`);
+    if (this.socket) {
+      try {
+        this.socket.close();
+      } catch (e) {}
+      this.socket = null;
+    }
+
+    if (wasConnected) {
+      this._appendRawLog('Hardware disconnected.');
+    }
   }
 
   /**
@@ -308,7 +283,8 @@ function parsePacket(line) {
   }
 
   /**
-   * Parse sensor line according to selected protocol
+   * Parse sensor line according to standard formats
+   * Format includes IMU speed (m/s) and tilt (deg)
    */
   parseSensorLine(line) {
     if (!line || typeof line !== 'string') return null;
@@ -320,7 +296,7 @@ function parsePacket(line) {
         return this._normalizeTelemetry(obj);
       }
 
-      // 2. Key-Value Format: GAS:120,CO:15,TEMP:28.4...
+      // 2. Key-Value Format: GAS:120,CO:15,TEMP:28.4,SPEED:0.4,TILT:5.2...
       if (line.includes(':') && line.includes(',')) {
         const pairs = line.split(',');
         const obj = {};
@@ -335,8 +311,8 @@ function parsePacket(line) {
         return this._normalizeTelemetry(obj);
       }
 
-      // 3. Comma-Separated Values (CSV default)
-      // Standard order: gas, co, co2, temp, humidity, water, obstacle, rover_status
+      // 3. Comma-Separated Values (CSV standard)
+      // Order: gas, co, co2, temp, humidity, water, obstacle, rover_status, speed, tilt
       if (line.includes(',')) {
         const parts = line.split(',').map(s => s.trim());
         return {
@@ -347,14 +323,11 @@ function parsePacket(line) {
           humidity: this._parseNum(parts[4], 50.0),
           water: this._parseNum(parts[5], 0),
           obstacle: this._parseNum(parts[6], 100),
-          rover_status: parts[7] || 'STATIONARY',
+          rover_status: parts[7] || 'NORMAL',
+          speed: this._parseNum(parts[8], 0.0),
+          tilt: this._parseNum(parts[9], 0.0),
           timestamp: Date.now()
         };
-      }
-
-      // 4. Custom evaluation if configured
-      if (this.parserFormat === 'custom' && this.customParserFn) {
-        return this.customParserFn(line);
       }
 
       return null;
@@ -379,7 +352,9 @@ function parsePacket(line) {
       humidity: this._parseNum(raw.humidity ?? raw.hum ?? raw.dht_hum, 50.0),
       water: this._parseNum(raw.water ?? raw.flood ?? raw.water_level, 0),
       obstacle: this._parseNum(raw.obstacle ?? raw.dist ?? raw.distance ?? raw.ultrasonic, 100),
-      rover_status: raw.rover_status ?? raw.status ?? raw.state ?? 'IDLE',
+      rover_status: raw.rover_status ?? raw.status ?? raw.state ?? 'NORMAL',
+      speed: this._parseNum(raw.speed ?? raw.linear_speed ?? raw.spd ?? raw.velocity, 0.0),
+      tilt: this._parseNum(raw.tilt ?? raw.tilt_angle ?? raw.pitch ?? raw.roll ?? raw.angle, 0.0),
       timestamp: Date.now()
     };
   }
@@ -397,8 +372,24 @@ function parsePacket(line) {
     return this.rawLogBuffer;
   }
 
-  clearRawLogs() {
-    this.rawLogBuffer = [];
+  onData(cb) {
+    this.dataListeners.add(cb);
+    return () => this.dataListeners.delete(cb);
+  }
+
+  onStatusChange(cb) {
+    this.statusListeners.add(cb);
+    return () => this.statusListeners.delete(cb);
+  }
+
+  _notifyData(parsed, raw) {
+    this.dataListeners.forEach(cb => {
+      try {
+        cb(parsed, raw);
+      } catch (e) {
+        console.error('[Hardware] Error in data listener:', e);
+      }
+    });
   }
 }
 
