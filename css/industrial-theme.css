@@ -1,0 +1,183 @@
+/**
+ * SCADA Industrial Theme Design Tokens
+ * Utilitarian, high-contrast, dark graphite palette for tactical control-room software.
+ */
+
+:root {
+  /* Graphite & Charcoal Surfaces */
+  --bg-app: #0c0f13;
+  --bg-panel: #13181f;
+  --bg-card: #182029;
+  --bg-card-header: #1d2632;
+  --bg-input: #10151c;
+  --bg-modal-backdrop: rgba(6, 9, 12, 0.85);
+
+  /* Hairline Borders */
+  --border-subtle: #1f2732;
+  --border-card: #273342;
+  --border-highlight: #3a4b60;
+  --border-active: #f59e0b;
+
+  /* Typography */
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Text Colors */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-amber: #f59e0b;
+  --text-amber-glow: #fbbf24;
+
+  /* Calibrated Industrial Status Tones */
+  --status-safe: #22a06b;
+  --status-safe-text: #34d399;
+  --status-safe-bg: rgba(34, 160, 107, 0.12);
+  --status-safe-border: rgba(34, 160, 107, 0.4);
+
+  --status-warning: #d97706;
+  --status-warning-text: #fbbf24;
+  --status-warning-bg: rgba(217, 119, 6, 0.15);
+  --status-warning-border: rgba(217, 119, 6, 0.45);
+
+  --status-critical: #cf443b;
+  --status-critical-text: #f87171;
+  --status-critical-bg: rgba(207, 68, 59, 0.18);
+  --status-critical-border: rgba(207, 68, 59, 0.55);
+
+  --status-muted: #525d6e;
+  --status-muted-text: #94a3b8;
+  --status-muted-bg: rgba(82, 93, 110, 0.15);
+  --status-muted-border: rgba(82, 93, 110, 0.35);
+
+  /* Tactical Accents */
+  --accent-amber: #f59e0b;
+  --accent-blue: #0284c7;
+  --accent-cyan: #06b6d4;
+
+  /* Industrial Geometry */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+}
+
+/* Subtle CAD Background Grain & Technical Grid */
+body {
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-image: 
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 32px 32px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom Tactical Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-app);
+}
+::-webkit-scrollbar-thumb {
+  background: #252f3d;
+  border-radius: var(--radius-xs);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a495c;
+}
+
+/* Custom Crosshair Cursor for Technical Feeds */
+.cursor-crosshair,
+.video-canvas-container,
+.mine-map-svg {
+  cursor: crosshair !important;
+}
+
+/* Industrial Left-Stripe Alert Tags (Datadog/Grafana Style) */
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  background: var(--bg-input);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  border-left-width: 3px;
+  white-space: nowrap;
+}
+
+.status-tag.tag-safe {
+  border-left-color: var(--status-safe);
+  color: var(--status-safe-text);
+  background: var(--status-safe-bg);
+}
+
+.status-tag.tag-warn,
+.status-tag.tag-warning,
+.status-tag.tag-conditionalcaution {
+  border-left-color: var(--status-warning);
+  color: var(--status-warning-text);
+  background: var(--status-warning-bg);
+}
+
+.status-tag.tag-crit,
+.status-tag.tag-critical,
+.status-tag.tag-restrictednogo {
+  border-left-color: var(--status-critical);
+  color: var(--status-critical-text);
+  background: var(--status-critical-bg);
+}
+
+.status-tag.tag-muted,
+.status-tag.tag-info,
+.status-tag.tag-disconnected {
+  border-left-color: var(--status-muted);
+  color: var(--status-muted-text);
+  background: var(--status-muted-bg);
+}
+
+/* Keyboard Shortcut Hints */
+.kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: #1e2632;
+  border: 1px solid #313d4f;
+  border-radius: 2px;
+  padding: 1px 4px;
+  margin-left: 5px;
+  line-height: 1;
+}
+
+/* Scanline / Telemetry Pulse Animation */
+.telemetry-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #374151;
+  display: inline-block;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.telemetry-pip.pulse {
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.8);
+}
